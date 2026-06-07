@@ -26,6 +26,16 @@ a {
   color: var(--accent-dark);
 }
 
+.verification-line {
+  padding: 10px 16px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  background: #eef8f5;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
 .legal-shell {
   width: min(920px, calc(100% - 32px));
   margin: 0 auto;
