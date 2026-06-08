@@ -116,26 +116,47 @@ def probe_duration(ffmpeg, media):
     ffprobe = ffmpeg.with_name("ffprobe.exe")
     if not ffprobe.exists():
         ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return 90.0
+    if ffprobe:
+        result = subprocess.run(
+            [
+                str(ffprobe),
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(media),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        try:
+            return float(result.stdout.strip())
+        except ValueError:
+            pass
+
+    # Fall back to parsing ffmpeg's container summary if ffprobe is unavailable.
     result = subprocess.run(
-        [
-            str(ffprobe),
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(media),
-        ],
+        [str(ffmpeg), "-i", str(media)],
         capture_output=True,
         text=True,
     )
-    try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return 90.0
+    for line in result.stderr.splitlines():
+        if "Duration:" not in line:
+            continue
+        duration_text = line.split("Duration:", 1)[1].split(",", 1)[0].strip()
+        parts = duration_text.split(":")
+        if len(parts) != 3:
+            continue
+        try:
+            hours = float(parts[0])
+            minutes = float(parts[1])
+            seconds = float(parts[2])
+            return hours * 3600 + minutes * 60 + seconds
+        except ValueError:
+            continue
+    return 90.0
 
 
 def build_filter_complex():
@@ -235,6 +256,54 @@ def process(limit, clips_per_video):
     print(json.dumps({"created": created, "manifest": str(MANIFEST_PATH)}, indent=2, ensure_ascii=False))
 
 
+def create_additional_clips_from_existing(count):
+    ensure_paths()
+    ffmpeg = get_ffmpeg()
+    manifest = load_json(MANIFEST_PATH, {"clips": []})
+    existing = manifest.get("clips", [])
+    by_video = {}
+    for item in existing:
+        by_video.setdefault(item["video_id"], []).append(item)
+
+    created = []
+    video_ids = list(by_video.keys())
+    video_cursor = 0
+    while len(created) < count and video_ids:
+        video_id = video_ids[video_cursor % len(video_ids)]
+        clips_for_video = by_video[video_id]
+        source = clips_for_video[0]
+        next_clip_index = max(item.get("clip_index", 1) for item in clips_for_video) + 1
+        video = {
+            "id": source["video_id"],
+            "title": source["source_title"],
+            "url": source["source_url"],
+        }
+        media = download_video(video)
+        duration = probe_duration(ffmpeg, media)
+        clip_duration = min(90.0, max(60.0, duration))
+        usable = max(0.0, duration - clip_duration)
+        # Spread extra clips through the source video so repeated clips are not identical.
+        ratio = min(0.9, 0.25 * next_clip_index)
+        start = 0.0 if usable <= 0 else usable * ratio
+        output_number = len(manifest["clips"]) + 1
+        item = make_clip(
+            ffmpeg,
+            video,
+            next_clip_index,
+            start,
+            clip_duration,
+            output_number,
+            media=media,
+        )
+        manifest["clips"].append(item)
+        clips_for_video.append(item)
+        created.append(item)
+        video_cursor += 1
+
+    save_json(MANIFEST_PATH, manifest)
+    print(json.dumps({"created": created, "manifest": str(MANIFEST_PATH)}, indent=2, ensure_ascii=False))
+
+
 def rebuild_existing():
     ensure_paths()
     ffmpeg = get_ffmpeg()
@@ -272,9 +341,13 @@ def main():
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--clips-per-video", type=int, default=1)
     parser.add_argument("--rebuild-existing", action="store_true")
+    parser.add_argument("--extra-clips-from-existing", type=int, default=0)
     args = parser.parse_args()
     if args.rebuild_existing:
         rebuild_existing()
+        return
+    if args.extra_clips_from_existing > 0:
+        create_additional_clips_from_existing(args.extra_clips_from_existing)
         return
     process(args.limit, args.clips_per_video)
 
