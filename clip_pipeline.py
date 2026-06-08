@@ -1,11 +1,8 @@
 import argparse
 import json
-import math
-import os
 import shutil
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 
@@ -18,7 +15,6 @@ STATE_PATH = WORK / "processed.json"
 MANIFEST_PATH = CLIPS / "manifest.json"
 CHANNEL_URL = "https://www.youtube.com/@AndreaCimi/videos"
 FFMPEG_EXE = TOOLS / "imageio_ffmpeg" / "binaries" / "ffmpeg-win-x86_64-v7.1.exe"
-DEFAULT_FONT = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"
 
 
 def run(command, check=True):
@@ -89,16 +85,17 @@ def list_channel(limit):
     return videos
 
 
-def download_video(video):
+def download_video(video, force=False):
     output = SOURCES / f"{video['id']}.%(ext)s"
+    overwrite_arg = "--force-overwrites" if force else "--no-overwrites"
     run(
         ytdlp_args(
             "-f",
-            "bv*[height<=1080]+ba/b[height<=1080]/best[height<=1080]/best",
+            "bv*[height<=1200]+ba/b[height<=1200]/best[height<=1200]/best",
             "--merge-output-format",
             "mp4",
             "--write-info-json",
-            "--no-overwrites",
+            overwrite_arg,
             "-o",
             str(output),
             video["url"],
@@ -141,42 +138,21 @@ def probe_duration(ffmpeg, media):
         return 90.0
 
 
-def escape_drawtext(text):
-    return (
-        text.replace("\\", "\\\\")
-        .replace(":", "\\:")
-        .replace("'", "\\'")
-        .replace("%", "\\%")
-    )
-
-
-def title_overlay_text(video, index):
-    wrapped = textwrap.wrap(video["title"], width=24)[:3]
-    lines = wrapped or [video["title"] or video["id"]]
-    lines.append(f"Clip {index}")
-    return escape_drawtext("\n".join(lines))
-
-
-def build_filter_complex(video, index):
-    fontfile = escape_drawtext(str(DEFAULT_FONT).replace("\\", "/"))
-    title_text = title_overlay_text(video, index)
+def build_filter_complex():
     return (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=30:10[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[composite];"
-        "[composite]drawbox=x=0:y=ih*0.74:w=iw:h=ih*0.26:color=black@0.35:t=fill,"
-        f"drawtext=fontfile='{fontfile}':text='{title_text}':"
-        "x=(w-text_w)/2:y=H*0.79:fontcolor=white:fontsize=54:"
-        "line_spacing=10:borderw=2:bordercolor=black@0.45:fix_bounds=true"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
     )
 
 
-def make_clip(ffmpeg, video, media, index, start, duration):
-    safe_id = video["id"]
-    clip_name = f"{safe_id}_clip_{index:02d}.mp4"
+def make_clip(ffmpeg, video, index, start, duration, output_number, media=None, force_download=False):
+    if media is None:
+        media = download_video(video, force=force_download)
+    clip_name = f"{output_number}.mp4"
     out = CLIPS / clip_name
-    filter_complex = build_filter_complex(video, index)
+    filter_complex = build_filter_complex()
     run(
         [
             str(ffmpeg),
@@ -206,14 +182,15 @@ def make_clip(ffmpeg, video, media, index, start, duration):
     )
     title = f"{video['title']} | Clip {index}"
     caption = f"{video['title']}\n\n#shorts #reels #tiktok #tradingof #viral"
-    (CLIPS / f"{safe_id}_clip_{index:02d}.txt").write_text(
+    metadata_path = CLIPS / f"{output_number}.txt"
+    metadata_path.write_text(
         f"Title: {title}\n\nCaption:\n{caption}\n\nSource: {video['url']}\nStart: {start:.2f}s\nDuration: {duration:.2f}s\n",
         encoding="utf-8",
     )
     return {
         "file": str(out.relative_to(ROOT)),
-        "metadata_file": str((CLIPS / f"{safe_id}_clip_{index:02d}.txt").relative_to(ROOT)),
-        "video_id": safe_id,
+        "metadata_file": str(metadata_path.relative_to(ROOT)),
+        "video_id": video["id"],
         "source_url": video["url"],
         "source_title": video["title"],
         "clip_index": index,
@@ -221,7 +198,7 @@ def make_clip(ffmpeg, video, media, index, start, duration):
         "duration_seconds": round(duration, 2),
         "title": title,
         "caption": caption,
-        "render_style": "full-frame-over-blurred-vertical-background-with-title-overlay",
+        "render_style": "full-frame-over-blurred-vertical-background",
     }
 
 
@@ -247,7 +224,8 @@ def process(limit, clips_per_video):
         video_clips = []
         for index in range(1, count + 1):
             start = 0.0 if count == 1 else usable * ((index - 1) / max(1, count - 1))
-            item = make_clip(ffmpeg, video, media, index, start, clip_duration)
+            output_number = len(manifest["clips"]) + 1
+            item = make_clip(ffmpeg, video, index, start, clip_duration, output_number, media=media)
             manifest["clips"].append(item)
             created.append(item)
             video_clips.append(item)
@@ -257,11 +235,47 @@ def process(limit, clips_per_video):
     print(json.dumps({"created": created, "manifest": str(MANIFEST_PATH)}, indent=2, ensure_ascii=False))
 
 
+def rebuild_existing():
+    ensure_paths()
+    ffmpeg = get_ffmpeg()
+    manifest = load_json(MANIFEST_PATH, {"clips": []})
+    existing = manifest.get("clips", [])
+    rebuilt = []
+    for path in CLIPS.glob("*"):
+        if path.name == "manifest.json":
+            continue
+        if path.is_file():
+            path.unlink()
+    for output_number, item in enumerate(existing, start=1):
+        video = {
+            "id": item["video_id"],
+            "title": item["source_title"],
+            "url": item["source_url"],
+        }
+        rebuilt.append(
+            make_clip(
+                ffmpeg,
+                video,
+                item.get("clip_index", 1),
+                float(item.get("start_seconds", 0.0)),
+                float(item.get("duration_seconds", 90.0)),
+                output_number,
+                force_download=True,
+            )
+        )
+    save_json(MANIFEST_PATH, {"clips": rebuilt})
+    print(json.dumps({"rebuilt": rebuilt, "manifest": str(MANIFEST_PATH)}, indent=2, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--clips-per-video", type=int, default=1)
+    parser.add_argument("--rebuild-existing", action="store_true")
     args = parser.parse_args()
+    if args.rebuild_existing:
+        rebuild_existing()
+        return
     process(args.limit, args.clips_per_video)
 
 
