@@ -1,9 +1,11 @@
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 
@@ -16,6 +18,7 @@ STATE_PATH = WORK / "processed.json"
 MANIFEST_PATH = CLIPS / "manifest.json"
 CHANNEL_URL = "https://www.youtube.com/@AndreaCimi/videos"
 FFMPEG_EXE = TOOLS / "imageio_ffmpeg" / "binaries" / "ffmpeg-win-x86_64-v7.1.exe"
+DEFAULT_FONT = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"
 
 
 def run(command, check=True):
@@ -138,11 +141,42 @@ def probe_duration(ffmpeg, media):
         return 90.0
 
 
+def escape_drawtext(text):
+    return (
+        text.replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+        .replace("%", "\\%")
+    )
+
+
+def title_overlay_text(video, index):
+    wrapped = textwrap.wrap(video["title"], width=24)[:3]
+    lines = wrapped or [video["title"] or video["id"]]
+    lines.append(f"Clip {index}")
+    return escape_drawtext("\n".join(lines))
+
+
+def build_filter_complex(video, index):
+    fontfile = escape_drawtext(str(DEFAULT_FONT).replace("\\", "/"))
+    title_text = title_overlay_text(video, index)
+    return (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=30:10[bg];"
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[composite];"
+        "[composite]drawbox=x=0:y=ih*0.74:w=iw:h=ih*0.26:color=black@0.35:t=fill,"
+        f"drawtext=fontfile='{fontfile}':text='{title_text}':"
+        "x=(w-text_w)/2:y=H*0.79:fontcolor=white:fontsize=54:"
+        "line_spacing=10:borderw=2:bordercolor=black@0.45:fix_bounds=true"
+    )
+
+
 def make_clip(ffmpeg, video, media, index, start, duration):
     safe_id = video["id"]
     clip_name = f"{safe_id}_clip_{index:02d}.mp4"
     out = CLIPS / clip_name
-    vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+    filter_complex = build_filter_complex(video, index)
     run(
         [
             str(ffmpeg),
@@ -153,8 +187,8 @@ def make_clip(ffmpeg, video, media, index, start, duration):
             f"{duration:.2f}",
             "-i",
             str(media),
-            "-vf",
-            vf,
+            "-filter_complex",
+            filter_complex,
             "-c:v",
             "libx264",
             "-preset",
@@ -187,6 +221,7 @@ def make_clip(ffmpeg, video, media, index, start, duration):
         "duration_seconds": round(duration, 2),
         "title": title,
         "caption": caption,
+        "render_style": "full-frame-over-blurred-vertical-background-with-title-overlay",
     }
 
 
