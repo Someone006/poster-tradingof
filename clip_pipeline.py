@@ -209,12 +209,14 @@ def process(limit, clips_per_video):
         clip_duration = min(90.0, max(60.0, duration))
         usable = max(0.0, duration - clip_duration)
         count = max(1, clips_per_video)
+        video_clips = []
         for index in range(1, count + 1):
             start = 0.0 if count == 1 else usable * ((index - 1) / max(1, count - 1))
             item = make_clip(ffmpeg, video, media, index, start, clip_duration)
             manifest["clips"].append(item)
             created.append(item)
-        state["processed_videos"][video["id"]] = {"clips": len(created), "title": video["title"], "url": video["url"]}
+            video_clips.append(item)
+        state["processed_videos"][video["id"]] = {"clips": len(video_clips), "title": video["title"], "url": video["url"]}
         save_json(STATE_PATH, state)
         save_json(MANIFEST_PATH, manifest)
     print(json.dumps({"created": created, "manifest": str(MANIFEST_PATH)}, indent=2, ensure_ascii=False))
